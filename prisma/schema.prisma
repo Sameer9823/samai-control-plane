@@ -1,0 +1,587 @@
+// SamAI Control Plane — Prisma schema
+// Run `npx prisma generate` after `npm install` (needs normal internet
+// access to fetch Prisma's engine binaries — this sandbox's network is
+// restricted, so generation/migration was verified here via hand-derived
+// raw SQL against a live Postgres instance instead; see prisma/migrations/).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/**
+ * In Prisma 7 the datasource URL lives in `prisma.config.ts`, not in this
+ * schema file. See the transparency note in README.md's Database section.
+ */
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id         String      @id @default(cuid())
+  name       String
+  createdAt  DateTime    @default(now())
+  workspaces Workspace[]
+  users      User[]
+  apiKeys    APIKey[]
+  webhooks   Webhook[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String        @id @default(cuid())
+  email          String        @unique
+  name           String?
+  hashedPassword String?
+  role           Role          @default(DEVELOPER)
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime      @default(now())
+  approvals      Approval[]    @relation("ApprovalResolver")
+
+  @@index([organizationId])
+  @@map("users")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+model Workspace {
+  id             String        @id @default(cuid())
+  name           String
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  environments   Environment[]
+  agents         Agent[]
+  tools          Tool[]
+  mcpServers     MCPServer[]
+  apiKeys        APIKey[]
+  webhooks       Webhook[]
+  createdAt      DateTime      @default(now())
+
+  @@index([organizationId])
+  @@map("workspaces")
+}
+
+model Environment {
+  id          String    @id @default(cuid())
+  name        String // "development" | "staging" | "production"
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agents      Agent[]
+  runs        Run[]
+
+  @@unique([workspaceId, name])
+  @@map("environments")
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+model Agent {
+  id            String        @id @default(cuid())
+  name          String
+  description   String
+  workspaceId   String
+  workspace     Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  environmentId String
+  environment   Environment   @relation(fields: [environmentId], references: [id])
+  provider      String // anthropic | openai | google | groq | mistral | ollama | azure | bedrock
+  model         String
+  temperature   Float         @default(0.4)
+  maxTokens     Int           @default(4096)
+  instructions  String
+  memory        String        @default("session") // none | session | vector | graph | hybrid
+  status        AgentStatus   @default(DRAFT)
+  currentVersionId String?    @unique
+  currentVersion  AgentVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  versions      AgentVersion[] @relation("AgentVersions")
+  tools         AgentTool[]
+  mcpServers    AgentMCPServer[]
+  guardrails    AgentGuardrail[]
+  handoffTo     AgentHandoff[] @relation("FromAgent")
+  handoffFrom   AgentHandoff[] @relation("ToAgent")
+  runs          Run[]
+  sessions      Session[]
+  evaluations   Evaluation[]
+  memoryRecords Memory[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([workspaceId])
+  @@index([environmentId])
+  @@map("agents")
+}
+
+enum AgentStatus {
+  ACTIVE
+  PAUSED
+  DRAFT
+}
+
+model AgentVersion {
+  id           String    @id @default(cuid())
+  agentId      String
+  agent        Agent     @relation("AgentVersions", fields: [agentId], references: [id], onDelete: Cascade)
+  version      String // "v14"
+  snapshot     Json // full agent config at time of version
+  createdAt    DateTime  @default(now())
+  currentFor   Agent?    @relation("CurrentVersion")
+
+  @@unique([agentId, version])
+  @@map("agent_versions")
+}
+
+model Tool {
+  id               String      @id @default(cuid())
+  name             String
+  type             String // HTTP | Database | Sandbox | MCP | Custom | Search
+  description      String
+  schema           Json
+  requiresApproval Boolean     @default(false)
+  status           String      @default("active")
+  workspaceId      String
+  workspace        Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agents           AgentTool[]
+  toolCalls        ToolCall[]
+
+  @@unique([workspaceId, name])
+  @@map("tools")
+}
+
+model AgentTool {
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  toolId  String
+  tool    Tool   @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, toolId])
+  @@map("agent_tools")
+}
+
+model AgentHandoff {
+  id           String @id @default(cuid())
+  fromAgentId  String
+  fromAgent    Agent  @relation("FromAgent", fields: [fromAgentId], references: [id], onDelete: Cascade)
+  toAgentId    String
+  toAgent      Agent  @relation("ToAgent", fields: [toAgentId], references: [id], onDelete: Cascade)
+
+  @@unique([fromAgentId, toAgentId])
+  @@map("agent_handoffs")
+}
+
+model Guardrail {
+  id          String            @id @default(cuid())
+  name        String
+  description String
+  agents      AgentGuardrail[]
+  events      GuardrailEvent[]
+
+  @@map("guardrails")
+}
+
+model AgentGuardrail {
+  agentId     String
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  guardrailId String
+  guardrail   Guardrail @relation(fields: [guardrailId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, guardrailId])
+  @@map("agent_guardrails")
+}
+
+model GuardrailEvent {
+  id          String    @id @default(cuid())
+  guardrailId String
+  guardrail   Guardrail @relation(fields: [guardrailId], references: [id])
+  runId       String?
+  run         Run?      @relation(fields: [runId], references: [id])
+  agentName   String
+  stage       String // input | output | tool
+  action      String // blocked | redacted | warned | allowed
+  reason      String
+  timestamp   DateTime  @default(now())
+
+  @@index([guardrailId])
+  @@index([runId])
+  @@map("guardrail_events")
+}
+
+// ---------------------------------------------------------------------------
+// MCP
+// ---------------------------------------------------------------------------
+
+model MCPServer {
+  id          String        @id @default(cuid())
+  name        String
+  transport   String // stdio | sse | http
+  endpoint    String
+  status      String        @default("connected")
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tools       MCPTool[]
+  agents      AgentMCPServer[]
+  lastUsed    DateTime?
+
+  @@unique([workspaceId, name])
+  @@map("mcp_servers")
+}
+
+model MCPTool {
+  id          String    @id @default(cuid())
+  mcpServerId String
+  mcpServer   MCPServer @relation(fields: [mcpServerId], references: [id], onDelete: Cascade)
+  name        String
+
+  @@unique([mcpServerId, name])
+  @@map("mcp_tools")
+}
+
+// Which agents are wired up to use which MCP server — tracked separately
+// from AgentTool (which agents use which of *this build's own* Tool rows),
+// since an MCP server's tools (MCPTool) aren't Tool rows themselves.
+model AgentMCPServer {
+  agentId     String
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  mcpServerId String
+  mcpServer   MCPServer @relation(fields: [mcpServerId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, mcpServerId])
+  @@map("agent_mcp_servers")
+}
+
+// ---------------------------------------------------------------------------
+// Runs, traces
+// ---------------------------------------------------------------------------
+
+model Run {
+  id            String      @id @default(cuid())
+  agentId       String
+  agent         Agent       @relation(fields: [agentId], references: [id])
+  environmentId String
+  environment   Environment @relation(fields: [environmentId], references: [id])
+  status        RunStatus
+  model         String
+  input         String
+  output        String?
+  inputTokens   Int         @default(0)
+  outputTokens  Int         @default(0)
+  totalTokens   Int         @default(0)
+  costUsd       Float       @default(0)
+  durationMs    Int         @default(0)
+  startedAt     DateTime    @default(now())
+  finishedAt    DateTime?
+  events        RunEvent[]
+  trace         Trace?
+  guardrailEvents GuardrailEvent[]
+  approvals     Approval[]
+
+  @@index([agentId])
+  @@index([environmentId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("runs")
+}
+
+enum RunStatus {
+  SUCCESS
+  RUNNING
+  FAILED
+  WAITING_APPROVAL
+  CANCELLED
+}
+
+// High-level lifecycle events for the Runs activity feed (spec section 12/33).
+model RunEvent {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  type      String // run.started | model.started | tool.started | handoff.started | ...
+  payload   Json?
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@map("run_events")
+}
+
+model Trace {
+  id         String       @id @default(cuid())
+  runId      String       @unique
+  run        Run          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  agentPath  String[]
+  totalUsage Json // { inputTokens, outputTokens, totalTokens, cacheReadTokens?, cacheWriteTokens? }
+  startedAt  DateTime
+  finishedAt DateTime?
+  events     TraceEvent[]
+
+  @@map("traces")
+}
+
+// One row per samai-sdk AgentEvent — `type` + `payload` mirrors the SDK's
+// own discriminated-union TraceEvent shape (lib/samai/types.ts), ordered by
+// `sequence` so a run's full RunTrace reconstructs losslessly.
+model TraceEvent {
+  id        String   @id @default(cuid())
+  traceId   String
+  trace     Trace    @relation(fields: [traceId], references: [id], onDelete: Cascade)
+  sequence  Int
+  type      String
+  agentName String?
+  payload   Json
+  timestamp Float // ms offset, matches samai-sdk's TraceEvent.timestamp
+
+  @@unique([traceId, sequence])
+  @@index([traceId])
+  @@map("trace_events")
+}
+
+model ToolCall {
+  id         String   @id @default(cuid())
+  toolId     String
+  tool       Tool     @relation(fields: [toolId], references: [id])
+  runId      String
+  args       Json
+  isError    Boolean  @default(false)
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([toolId])
+  @@index([runId])
+  @@map("tool_calls")
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
+model Memory {
+  id            String            @id @default(cuid())
+  type          String // session | vector | graph | fact
+  source        String
+  content       String
+  confidence    Float
+  version       Int               @default(1)
+  agentId       String?
+  agent         Agent?            @relation(fields: [agentId], references: [id])
+  relationships MemoryRelation[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([agentId])
+  @@index([type])
+  @@map("memory")
+}
+
+model MemoryRelation {
+  id        String @id @default(cuid())
+  memoryId  String
+  memory    Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  predicate String
+  target    String
+
+  @@index([memoryId])
+  @@map("memory_relations")
+}
+
+// ---------------------------------------------------------------------------
+// Models / providers
+// ---------------------------------------------------------------------------
+
+model ModelProvider {
+  id       String @id // "anthropic" | "openai" | ...
+  name     String
+  status   String @default("operational")
+  configurations ModelConfiguration[]
+
+  @@map("model_providers")
+}
+
+model ModelConfiguration {
+  id          String        @id @default(cuid())
+  providerId  String
+  provider    ModelProvider @relation(fields: [providerId], references: [id])
+  model       String
+  isPrimary   Boolean       @default(false)
+  isFallback  Boolean       @default(false)
+  retries     Int           @default(2)
+  timeoutMs   Int           @default(30000)
+
+  @@map("model_configurations")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+model Session {
+  id         String    @id @default(cuid())
+  userRef    String // opaque end-user id from the host application
+  agentId    String
+  agent      Agent     @relation(fields: [agentId], references: [id])
+  store      String // InMemorySessionStore | FileSessionStore | RedisSessionStore | SqliteSessionStore
+  messages   Message[]
+  lastActive DateTime  @default(now())
+  createdAt  DateTime  @default(now())
+
+  @@index([agentId])
+  @@map("sessions")
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String // user | assistant | tool
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@map("messages")
+}
+
+// ---------------------------------------------------------------------------
+// Evaluations
+// ---------------------------------------------------------------------------
+
+model Evaluation {
+  id         String            @id @default(cuid())
+  name       String
+  agentId    String
+  agent      Agent             @relation(fields: [agentId], references: [id])
+  dataset    String
+  evaluator  String
+  runs       EvaluationRun[]
+  createdAt  DateTime          @default(now())
+
+  @@index([agentId])
+  @@map("evaluations")
+}
+
+model EvaluationRun {
+  id           String             @id @default(cuid())
+  evaluationId String
+  evaluation   Evaluation         @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  passRate     Float
+  failedCases  Int
+  regression   Float
+  avgLatencyMs Int
+  tokenCost    Float
+  results      EvaluationResult[]
+  runAt        DateTime           @default(now())
+
+  @@index([evaluationId])
+  @@map("evaluation_runs")
+}
+
+model EvaluationResult {
+  id              String        @id @default(cuid())
+  evaluationRunId String
+  evaluationRun   EvaluationRun @relation(fields: [evaluationRunId], references: [id], onDelete: Cascade)
+  caseName        String
+  passed          Boolean
+  detail          Json?
+
+  @@index([evaluationRunId])
+  @@map("evaluation_results")
+}
+
+// ---------------------------------------------------------------------------
+// Approvals
+// ---------------------------------------------------------------------------
+
+model Approval {
+  id           String         @id @default(cuid())
+  runId        String
+  run          Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  agentName    String
+  toolName     String
+  args         Json
+  reason       String
+  risk         String // low | medium | high
+  status       ApprovalStatus @default(PENDING)
+  timestamp    DateTime       @default(now())
+  resolvedAt   DateTime?
+  resolvedById String?
+  resolvedBy   User?          @relation("ApprovalResolver", fields: [resolvedById], references: [id])
+  events       ApprovalEvent[]
+
+  @@index([runId])
+  @@index([status])
+  @@map("approvals")
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model ApprovalEvent {
+  id         String   @id @default(cuid())
+  approvalId String
+  approval   Approval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+  action     String // requested | approved | rejected
+  actorId    String?
+  createdAt  DateTime @default(now())
+
+  @@index([approvalId])
+  @@map("approval_events")
+}
+
+// ---------------------------------------------------------------------------
+// Usage, keys, webhooks
+// ---------------------------------------------------------------------------
+
+model UsageRecord {
+  id         String   @id @default(cuid())
+  date       DateTime @db.Date
+  runs       Int
+  tokens     Int
+  costUsd    Float
+  latencyMs  Int
+  toolCalls  Int
+
+  @@unique([date])
+  @@map("usage_records")
+}
+
+model APIKey {
+  id             String       @id @default(cuid())
+  name           String
+  prefix         String // e.g. "sk_live_8f2a…" — full value shown once, never stored
+  hashedKey      String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String?
+  workspace      Workspace?   @relation(fields: [workspaceId], references: [id])
+  createdAt      DateTime     @default(now())
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+model Webhook {
+  id             String       @id @default(cuid())
+  url            String
+  events         String[]
+  secret         String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String?
+  workspace      Workspace?   @relation(fields: [workspaceId], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+  @@map("webhooks")
+}
