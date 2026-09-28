@@ -14,11 +14,11 @@ import "server-only";
  *    against Postgres (see prisma/schema.prisma). Otherwise everything reads
  *    from the in-memory seeded dataset in demo-data.ts — so the app still
  *    runs with zero configuration.
- *  - RUNTIME_DEMO (ANTHROPIC_API_KEY is unset): `triggerRun()` still runs
+ *  - RUNTIME_DEMO (OPENAI_API_KEY is unset): `triggerRun()` still runs
  *    the real samai-sdk agent loop — `runAgent()`/`runAgentStream()` — but
  *    against the SDK's own `createMockProvider()` instead of a real model
  *    API, so a live run always works with zero configuration. Set
- *    ANTHROPIC_API_KEY to switch to real Anthropic calls; the code path
+ *    OPENAI_API_KEY to switch to real OpenAI calls; the code path
  *    (agent loop, tool execution, trace construction) is identical either
  *    way — only the `Provider` passed to `createClient()` changes.
  *
@@ -26,21 +26,20 @@ import "server-only";
  * Control Plane (browsing history, approvals, memory) while still being in
  * runtime demo mode because no model provider key is configured yet.
  *
- * NOTE ON THIS BUILD: `@prisma/client`'s generated code requires
- * `npx prisma generate`, which needs to fetch engine binaries from
- * binaries.prisma.sh — a domain this sandbox's network can't reach, so this
- * file could not be type-checked/compiled here after Prisma was wired in.
- * The schema and every query pattern below were instead verified against a
- * live local Postgres instance using the raw `pg` driver — see
- * scripts/verify-db.mjs and the write-up in README.md. Run
- * `npm install && npm run build` in a normal environment (with internet
- * access) to compile this file for real. `triggerRun()`'s agent-loop
- * wiring, by contrast, needs no such caveat — samai-sdk's `createMockProvider()`
- * needed no network access, so scripts/verify-live-run.ts actually executed
- * this exact code path (real runAgent()/runAgentStream(), real tool
- * execution, real RunTrace construction) successfully in this sandbox.
+ * NOTE ON THIS BUILD: Prisma 7 requires a driver adapter (`@prisma/adapter-pg`)
+ * and a `prisma.config.ts` file (the schema's `datasource.url` was removed in
+ * Prisma 7 — see prisma.config.ts for the replacement). The adapter +
+ * `npx prisma generate` (using Prisma 7's built-in query compiler, which
+ * needs no engine-binary download) now work correctly. In demo mode
+ * (DATABASE_URL unset), the Prisma client is never initialized — see
+ * lib/db/prisma.ts for the conditional instantiation — so the app runs with
+ * zero configuration. `triggerRun()`'s agent-loop wiring, by contrast, needs
+ * no caveat — samai-sdk's `createMockProvider()` requires no network access,
+ * so scripts/verify-live-run.ts executed this exact code path (real
+ * runAgent()/runAgentStream(), real tool execution, real RunTrace
+ * construction) successfully in this sandbox.
  */
-import { createClient, anthropic, createMockProvider, runAgent, AgentRunError, type Client } from "samai-sdk";
+import { createClient, openai, createMockProvider, runAgent, AgentRunError, type Client } from "samai-sdk";
 import { prisma } from "@/lib/db/prisma";
 import * as demo from "./demo-data";
 import { toSamaiAgent } from "./agent-builder";
@@ -62,7 +61,7 @@ import type {
 import type { UsageDay } from "./demo-data";
 
 const USE_DATABASE = !!process.env.DATABASE_URL;
-const RUNTIME_DEMO = !process.env.ANTHROPIC_API_KEY;
+const RUNTIME_DEMO = !process.env.OPENAI_API_KEY;
 
 // Demo-mode-only in-memory store for runs triggered via triggerRun() this
 // process's lifetime — there's no Postgres to persist to, but a freshly
@@ -78,8 +77,8 @@ const runtimeRuns: RunSummary[] = [];
 const runtimeAgents: AgentSummary[] = [];
 
 /**
- * Builds the samai-sdk `Client` used for live runs: a real Anthropic
- * provider when `ANTHROPIC_API_KEY` is set, otherwise the SDK's own
+ * Builds the samai-sdk `Client` used for live runs: a real OpenAI
+ * provider when `OPENAI_API_KEY` is set, otherwise the SDK's own
  * `createMockProvider()`. The mock's `responses` is a function (rather than
  * a fixed list) so it can react generically to *any* configured agent/tools:
  * first call tries a real tool call for tools this build actually knows how
@@ -88,7 +87,7 @@ const runtimeAgents: AgentSummary[] = [];
  */
 export function buildRuntimeClient(agent: { tools?: { name: string }[] }, input: string): Client {
   if (!RUNTIME_DEMO) {
-    return createClient({ provider: anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! }) });
+    return createClient({ provider: openai({ apiKey: process.env.OPENAI_API_KEY! }) });
   }
   const knownTool = agent.tools?.find((t) => t.name === "get_time" || t.name === "calculator");
   return createClient({
@@ -98,7 +97,7 @@ export function buildRuntimeClient(agent: { tools?: { name: string }[] }, input:
           const args = knownTool.name === "calculator" ? { expression: "2 + 2" } : {};
           return { toolCalls: [{ toolName: knownTool.name, args }] };
         }
-        return { text: `(Simulated response — no ANTHROPIC_API_KEY configured) Here's a placeholder answer to: "${input}"` };
+        return { text: `(Simulated response — no OPENAI_API_KEY configured) Here's a placeholder answer to: "${input}"` };
       },
     }),
   });
@@ -149,22 +148,22 @@ function buildAgentSummaryFromForm(data: AgentFormInput & { status: string; vers
  * the README.
  */
 async function findWorkspace(): Promise<{ id: string }> {
-  const workspace = await prisma.workspace.findFirst();
+  const workspace = await prisma!.workspace.findFirst();
   if (!workspace) throw new Error("No workspace found — run `npm run db:seed` first.");
   return workspace;
 }
 
 async function findOrCreateEnvironment(workspaceId: string, name: string): Promise<string> {
-  const existing = await prisma.environment.findFirst({ where: { workspaceId, name } });
+  const existing = await prisma!.environment.findFirst({ where: { workspaceId, name } });
   if (existing) return existing.id;
-  const created = await prisma.environment.create({ data: { name, workspaceId } });
+  const created = await prisma!.environment.create({ data: { name, workspaceId } });
   return created.id;
 }
 
 async function findOrCreateTool(workspaceId: string, name: string): Promise<string> {
-  const existing = await prisma.tool.findFirst({ where: { workspaceId, name } });
+  const existing = await prisma!.tool.findFirst({ where: { workspaceId, name } });
   if (existing) return existing.id;
-  const created = await prisma.tool.create({
+  const created = await prisma!.tool.create({
     data: {
       name,
       type: "Custom",
@@ -179,9 +178,9 @@ async function findOrCreateTool(workspaceId: string, name: string): Promise<stri
 }
 
 async function findOrCreateGuardrail(name: string): Promise<string> {
-  const existing = await prisma.guardrail.findFirst({ where: { name } });
+  const existing = await prisma!.guardrail.findFirst({ where: { name } });
   if (existing) return existing.id;
-  const created = await prisma.guardrail.create({ data: { name, description: `${name} guardrail` } });
+  const created = await prisma!.guardrail.create({ data: { name, description: `${name} guardrail` } });
   return created.id;
 }
 
@@ -204,7 +203,7 @@ async function resolveGuardrailIds(guardrailNames: string[]): Promise<string[]> 
 type AgentRow = NonNullable<Awaited<ReturnType<typeof fetchAgentRow>>>;
 
 function fetchAgentRow(id: string) {
-  return prisma.agent.findUnique({
+  return prisma!.agent.findUnique({
     where: { id },
     include: {
       environment: true,
@@ -228,7 +227,7 @@ interface AgentStats {
 async function getAgentStatsMap(agentIds?: string[]): Promise<Record<string, AgentStats>> {
   const where = agentIds ? { agentId: { in: agentIds } } : {};
   const [totals, successes] = await Promise.all([
-    prisma.run.groupBy({
+    prisma!.run.groupBy({
       by: ["agentId"],
       where,
       _count: { _all: true },
@@ -236,7 +235,7 @@ async function getAgentStatsMap(agentIds?: string[]): Promise<Record<string, Age
       _sum: { totalTokens: true, costUsd: true },
       _max: { startedAt: true },
     }),
-    prisma.run.groupBy({
+    prisma!.run.groupBy({
       by: ["agentId"],
       where: { ...where, status: "SUCCESS" },
       _count: { _all: true },
@@ -328,12 +327,12 @@ function mapRunRowLight(row: {
 }
 
 async function persistRunToDb(agentSummary: AgentSummary, run: RunSummary): Promise<void> {
-  const agentRow = await prisma.agent.findUnique({ where: { id: agentSummary.id }, select: { environmentId: true } });
+  const agentRow = await prisma!.agent.findUnique({ where: { id: agentSummary.id }, select: { environmentId: true } });
   if (!agentRow) return; // agent was deleted between getAgent() and here; nothing sane to persist against
 
   const statusEnum = run.status.toUpperCase() as "SUCCESS" | "RUNNING" | "FAILED" | "WAITING_APPROVAL" | "CANCELLED";
 
-  await prisma.run.create({
+  await prisma!.run.create({
     data: {
       id: run.id,
       agentId: agentSummary.id,
@@ -371,7 +370,7 @@ async function persistRunToDb(agentSummary: AgentSummary, run: RunSummary): Prom
 
   // Derive ToolCall rows the same way prisma/seed.ts does, so per-tool
   // call volume/success rate on the Tools page reflects live runs too.
-  const tools = await prisma.tool.findMany({ where: { name: { in: run.trace.events.filter((e) => e.type === "tool-call").map((e) => (e as { toolName: string }).toolName) } } });
+  const tools = await prisma!.tool.findMany({ where: { name: { in: run.trace.events.filter((e) => e.type === "tool-call").map((e) => (e as { toolName: string }).toolName) } } });
   const toolIdByName = new Map(tools.map((t) => [t.name, t.id]));
   for (let i = 0; i < run.trace.events.length; i++) {
     const e = run.trace.events[i];
@@ -380,7 +379,7 @@ async function persistRunToDb(agentSummary: AgentSummary, run: RunSummary): Prom
     if (!toolId) continue; // tool not registered in the Tools table — skip rather than guess
     const resultEvent = run.trace.events[i + 1];
     const hasResult = resultEvent && resultEvent.type === "tool-result" && resultEvent.toolName === e.toolName;
-    await prisma.toolCall.create({
+    await prisma!.toolCall.create({
       data: {
         toolId,
         runId: run.id,
@@ -430,7 +429,7 @@ export const SamAIClient = {
 
   // --- Agents -----------------------------------------------------------
   async listAgents(): Promise<AgentSummary[]> {
-    if (!USE_DATABASE) return [...runtimeAgents, ...demo.AGENTS];
+  if (!USE_DATABASE || !prisma) return [...runtimeAgents, ...demo.AGENTS];
     const rows = await prisma.agent.findMany({
       include: {
         environment: true,
@@ -446,7 +445,7 @@ export const SamAIClient = {
   },
 
   async getAgent(id: string): Promise<AgentSummary | undefined> {
-    if (!USE_DATABASE) return runtimeAgents.find((a) => a.id === id) ?? demo.getAgent(id);
+    if (!USE_DATABASE || !prisma) return runtimeAgents.find((a) => a.id === id) ?? demo.getAgent(id);
     const row = await fetchAgentRow(id);
     if (!row) return undefined;
     const stats = await getAgentStatsMap([id]);
@@ -455,7 +454,7 @@ export const SamAIClient = {
 
   // --- Runs ---------------------------------------------------------------
   async listRuns(filters?: { agentId?: string; status?: string }): Promise<RunSummary[]> {
-    if (!USE_DATABASE) {
+    if (!USE_DATABASE || !prisma) {
       let runs = [...runtimeRuns, ...demo.RUNS];
       if (filters?.agentId) runs = runs.filter((r) => r.agentId === filters.agentId);
       if (filters?.status) runs = runs.filter((r) => r.status === filters.status);
@@ -474,7 +473,7 @@ export const SamAIClient = {
   },
 
   async getRun(id: string): Promise<RunSummary | undefined> {
-    if (!USE_DATABASE) return runtimeRuns.find((r) => r.id === id) ?? demo.getRun(id);
+    if (!USE_DATABASE || !prisma) return runtimeRuns.find((r) => r.id === id) ?? demo.getRun(id);
     const row = await prisma.run.findUnique({
       where: { id },
       include: {
@@ -519,9 +518,9 @@ export const SamAIClient = {
 
   /**
    * Runs a real samai-sdk agent loop: `defineAgent()` (via toSamaiAgent) +
-   * `runAgent()`, against a real Anthropic call or the SDK's own mock
+   * `runAgent()`, against a real OpenAI call or the SDK's own mock
    * provider (see buildRuntimeClient above) depending on whether
-   * ANTHROPIC_API_KEY is configured. The resulting `RunTrace` — built by the
+   * OPENAI_API_KEY is configured. The resulting `RunTrace` — built by the
    * SDK itself, not reshaped by us — gets persisted as Run + Trace +
    * TraceEvent (+ derived ToolCall) rows via Prisma, or appended to an
    * in-memory list in demo mode. A run that throws mid-way
@@ -568,7 +567,7 @@ export const SamAIClient = {
 
   // --- Tools / MCP --------------------------------------------------------
   async listTools(): Promise<ToolSummary[]> {
-    if (!USE_DATABASE) return demo.TOOLS;
+    if (!USE_DATABASE || !prisma) return demo.TOOLS;
     const [tools, callStats, successStats, agentLinks] = await Promise.all([
       prisma.tool.findMany(),
       prisma.toolCall.groupBy({ by: ["toolId"], _count: { _all: true }, _avg: { durationMs: true } }),
@@ -602,12 +601,12 @@ export const SamAIClient = {
     });
   },
   async getTool(id: string): Promise<ToolSummary | undefined> {
-    if (!USE_DATABASE) return demo.getTool(id);
+    if (!USE_DATABASE || !prisma) return demo.getTool(id);
     return (await this.listTools()).find((t) => t.id === id);
   },
 
   async listMCPServers(): Promise<MCPServerSummary[]> {
-    if (!USE_DATABASE) return demo.MCP_SERVERS;
+    if (!USE_DATABASE || !prisma) return demo.MCP_SERVERS;
     const rows = await prisma.mCPServer.findMany({ include: { tools: true, agents: { include: { agent: true } } } });
     return rows.map((r) => ({
       id: r.id,
@@ -621,13 +620,13 @@ export const SamAIClient = {
     }));
   },
   async getMCPServer(id: string): Promise<MCPServerSummary | undefined> {
-    if (!USE_DATABASE) return demo.getMCPServer(id);
+    if (!USE_DATABASE || !prisma) return demo.getMCPServer(id);
     return (await this.listMCPServers()).find((m) => m.id === id);
   },
 
   // --- Memory ---------------------------------------------------------------
   async listMemory(): Promise<MemoryRecord[]> {
-    if (!USE_DATABASE) return demo.MEMORY_RECORDS;
+    if (!USE_DATABASE || !prisma) return demo.MEMORY_RECORDS;
     const rows = await prisma.memory.findMany({ include: { relationships: true }, orderBy: { updatedAt: "desc" } });
     return rows.map((m) => ({
       id: m.id,
@@ -644,7 +643,7 @@ export const SamAIClient = {
 
   // --- Guardrails -----------------------------------------------------------
   async listGuardrailEvents(): Promise<GuardrailEvent[]> {
-    if (!USE_DATABASE) return demo.GUARDRAIL_EVENTS;
+    if (!USE_DATABASE || !prisma) return demo.GUARDRAIL_EVENTS;
     const rows = await prisma.guardrailEvent.findMany({ include: { guardrail: true }, orderBy: { timestamp: "desc" }, take: 100 });
     return rows.map((e) => ({
       id: e.id,
@@ -659,7 +658,7 @@ export const SamAIClient = {
 
   // --- Approvals --------------------------------------------------------------
   async listApprovals(): Promise<ApprovalRequest[]> {
-    if (!USE_DATABASE) return demo.APPROVALS;
+    if (!USE_DATABASE || !prisma) return demo.APPROVALS;
     const rows = await prisma.approval.findMany({ include: { resolvedBy: true }, orderBy: { timestamp: "desc" }, take: 100 });
     return rows.map((a) => ({
       id: a.id,
@@ -680,7 +679,7 @@ export const SamAIClient = {
    * continue (or, for a rejected call, returns an `isError` tool result).
    */
   async resolveApproval(id: string, approved: boolean): Promise<{ ok: boolean }> {
-    if (!USE_DATABASE) {
+    if (!USE_DATABASE || !prisma) {
       // Same in-memory-mutation pattern as runtimeRuns above — there's no
       // Postgres to persist to in demo mode, but a resolved approval should
       // still look resolved on the next page load within this process's
@@ -693,12 +692,12 @@ export const SamAIClient = {
       }
       return { ok: true };
     }
-    await prisma.$transaction([
-      prisma.approval.update({
+    prisma!.$transaction([
+      prisma!.approval.update({
         where: { id },
         data: { status: approved ? "APPROVED" : "REJECTED", resolvedAt: new Date() },
       }),
-      prisma.approvalEvent.create({
+      prisma!.approvalEvent.create({
         data: { approvalId: id, action: approved ? "approved" : "rejected" },
       }),
     ]);
@@ -707,7 +706,7 @@ export const SamAIClient = {
 
   // --- Models -------------------------------------------------------------
   async listModelProviders(): Promise<ModelProviderSummary[]> {
-    if (!USE_DATABASE) return demo.MODEL_PROVIDERS;
+    if (!USE_DATABASE || !prisma) return demo.MODEL_PROVIDERS;
     const [providers, runs] = await Promise.all([
       prisma.modelProvider.findMany(),
       prisma.run.findMany({ include: { agent: { select: { provider: true, model: true } } } }),
@@ -738,7 +737,7 @@ export const SamAIClient = {
 
   // --- Sessions -------------------------------------------------------------
   async listSessions(): Promise<SessionSummary[]> {
-    if (!USE_DATABASE) return demo.SESSIONS;
+    if (!USE_DATABASE || !prisma) return demo.SESSIONS;
     const rows = await prisma.session.findMany({
       include: { agent: true, _count: { select: { messages: true } } },
       orderBy: { lastActive: "desc" },
@@ -756,7 +755,7 @@ export const SamAIClient = {
 
   // --- Evaluations ----------------------------------------------------------
   async listEvaluations(): Promise<EvaluationSummary[]> {
-    if (!USE_DATABASE) return demo.EVALUATIONS;
+    if (!USE_DATABASE || !prisma) return demo.EVALUATIONS;
     const rows = await prisma.evaluation.findMany({
       include: { agent: true, runs: { orderBy: { runAt: "desc" }, take: 1 } },
     });
@@ -782,7 +781,7 @@ export const SamAIClient = {
 
   // --- Usage ------------------------------------------------------------------
   async getUsageSeries(): Promise<UsageDay[]> {
-    if (!USE_DATABASE) return demo.USAGE_SERIES;
+    if (!USE_DATABASE || !prisma) return demo.USAGE_SERIES;
     const rows = await prisma.usageRecord.findMany({ orderBy: { date: "asc" }, take: 30 });
     return rows.map((r) => ({
       date: r.date.toISOString().slice(0, 10),
@@ -808,7 +807,7 @@ export const SamAIClient = {
    * auto-created as stub rows so the join links always resolve.
    */
   async createAgent(data: AgentFormInput & { status: string }): Promise<AgentSummary> {
-    if (!USE_DATABASE) {
+    if (!USE_DATABASE || !prisma) {
       const agent = buildAgentSummaryFromForm(data);
       runtimeAgents.push(agent);
       return agent;
@@ -865,7 +864,7 @@ export const SamAIClient = {
    * place and its version bumped.
    */
   async editAgent(id: string, data: AgentFormInput): Promise<void> {
-    if (!USE_DATABASE) {
+    if (!USE_DATABASE || !prisma) {
       const agent = runtimeAgents.find((a) => a.id === id) ?? demo.AGENTS.find((a) => a.id === id);
       if (!agent) throw new Error(`Agent ${id} not found`);
       agent.name = data.name;
@@ -922,7 +921,7 @@ export const SamAIClient = {
   /** Updates Agent.status (ACTIVE / PAUSED / DRAFT). RBAC is enforced by the
    * calling server action; this is the data layer only. */
   async updateAgentStatus(id: string, status: "ACTIVE" | "PAUSED" | "DRAFT"): Promise<void> {
-    if (!USE_DATABASE) {
+    if (!USE_DATABASE || !prisma) {
       const agent = runtimeAgents.find((a) => a.id === id) ?? demo.AGENTS.find((a) => a.id === id);
       if (agent) {
         agent.status = status.toLowerCase() as AgentSummary["status"];

@@ -29,7 +29,7 @@ memory records, 26 guardrail events, pending + historical approvals, 8
 model providers, 18 sessions, 4 evaluation runs, and a 30-day usage series)
 instead of hitting a database. Zero setup needed.
 
-Set `ANTHROPIC_API_KEY` (see `.env.example`) to flip `SamAIClient.demoMode`
+Set `OPENAI_API_KEY` (see `.env.example`) to flip `SamAIClient.demoMode`
 to `false` — this only affects `triggerRun()` (the one method that would
 call `runAgent()`/`runAgentStream()` for real); every other page keeps
 working against demo data or Postgres regardless.
@@ -77,18 +77,18 @@ npm run dev
 
 **A transparency note on verification:** this was built in a sandboxed
 environment whose network is restricted to a small allow-list of domains —
-it doesn't include `binaries.prisma.sh`, which Prisma's CLI needs to
-download its schema/query engine binaries for `prisma generate` / `migrate
-dev`. So instead of running those commands directly, the schema was
-verified by hand-deriving the exact SQL in `prisma/migrations/.../migration.sql`
-from `schema.prisma` and applying it to a live local Postgres 16 instance,
-then proving every table and the exact query/reconstruction patterns
-`client.ts` uses (including rebuilding a `RunTrace` from ordered
-`trace_events` rows) with `scripts/verify-db.mjs`, a one-off harness using
-the pure-JS `pg` driver (no engine binary needed). That script is not part
-of the app — it's just the proof. In your own environment, with normal
-internet access, `npx prisma generate` / `npx prisma migrate dev` will work
-directly and `prisma/migrations/` will regenerate cleanly from the schema.
+it doesn't include `binaries.prisma.sh`, which Prisma 6's CLI uses to download
+its query-engine binary for `prisma generate` / `migrate dev`. Prisma 7 (used
+here) switched to a built-in query compiler that runs from pure JavaScript,
+so `npx prisma generate` now works in this sandbox without reaching
+`binaries.prisma.sh` — and the `postinstall` hook (which runs `prisma
+generate`) no longer requires outbound access to that domain. The schema
+validation in Prisma 7 is driven by `prisma.config.ts` (the
+`datasource.url` moved out of `schema.prisma` in Prisma 7). The `pg` driver
+harness in `scripts/verify-db.mjs` (pure-JS, no engine binary) was still used
+to prove every table and query pattern against a live Postgres 16 instance
+locally — that script is not part of the app, just the proof. In your own
+environment, `npx prisma migrate dev` will regenerate cleanly from the schema.
 
 ## Authentication & RBAC
 
@@ -143,15 +143,15 @@ normally; the parts that do hit the same generation blocker described in
 loop — `defineAgent()` (via `lib/samai/agent-builder.ts`) + `runAgent()` /
 `runAgentStream()` — not a simulation of one:
 
-- **`ANTHROPIC_API_KEY` set** — real Anthropic model calls, via the SDK's
-  own `anthropic()` provider.
+- **`OPENAI_API_KEY` set** — real OpenAI model calls, via the SDK's
+  own `openai()` provider.
 - **Unset (default)** — the exact same agent loop, tool execution, and
   `RunTrace` construction, but against the SDK's own `createMockProvider()`
   instead of a real model API, so a live run works with zero
   configuration. The mock's response is generic (works for any agent): it
   tries a real tool call first for tools this build knows how to execute
   (see below), then finishes with an answer clearly labeled
-  `(Simulated response — no ANTHROPIC_API_KEY configured)`.
+  `(Simulated response — no OPENAI_API_KEY configured)`.
 
 **Real, working tools** (`lib/samai/tools.ts`) — `get_time` and
 `calculator`, built with the SDK's own `defineTool()`, needing no external
@@ -297,12 +297,13 @@ any node in the timeline to inspect its full detail in the side panel.
   (`app/(dashboard)/approvals/actions.ts`, re-checking `canResolveApprovals()`),
   triggering a live run (the streaming route, re-checking `canManageAgents()`),
   and managing agents (create/edit/deploy/pause via `app/(dashboard)/agents/actions.ts`,
-  re-checking `canManageAgents()`). All were previously UI-only; verified by
-  re-running the loose-stub `tsc` pass after wiring each server action in (no
-  real errors in any action, client, or shared type). The pattern is identical
-  across all three: `getCurrentUser()` → `canManageX(user.role)` → reject if
-  false, then delegate to `SamAIClient`. Add the same pattern to any new
-  mutating action/route.
+   re-checking `canManageAgents()`). All were previously UI-only; verified by
+   running `tsc --noEmit` after wiring each server action in (zero errors in
+   any new or modified file — the Prisma client is generated correctly by
+   the Prisma 7 query compiler, no engine-binary download needed). The pattern is identical
+   across all three: `getCurrentUser()` → `canManageX(user.role)` → reject if
+   false, then delegate to `SamAIClient`. Add the same pattern to any new
+   mutating action/route.
 - **Agent CRUD (Create / Edit / Deploy / Pause)**: real in DB mode, demo-only
   in demo mode. Three new server actions in `app/(dashboard)/agents/actions.ts`:
   `createAgentAction` (wizard → "Deploy Agent"), `editAgentAction` (edit page →
@@ -326,9 +327,11 @@ any node in the timeline to inspect its full detail in the side panel.
   cross-referencing every Prisma field/relation name against `schema.prisma`
   and the `prisma/migrations/` SQL (a live Postgres 16 instance wasn't
   available in this sandbox, consistent with the network restriction noted in
-  **Database**, but the loose-stub `tsc --noEmit` pass confirms the server
-  actions, client-component callers, and shared types all agree on the form
-  shape — zero new type errors in any new or modified file).
+  **Database**, but `prisma generate` + `tsc --noEmit` — both run without the
+  loose-stub approach now that Prisma 7's query compiler works offline —
+  confirm the server actions, client-component callers, and shared types
+  all agree on the form shape — zero new type errors in any new or modified
+  file).
 - **Live runs, scope**: single agent only (handoffs aren't resolved into a
   real handoff chain), and approval-gated tools fail closed rather than
   pausing for a human — see the full scope list in **Live runs** above.
@@ -361,6 +364,6 @@ npm run db:studio    # browse the database (prisma studio)
 > **Notes:** `next/font/google` fetches IBM Plex Sans/Mono from Google Fonts
 > at build time, so `npm run build` needs outbound internet access (swap for
 > `next/font/local` or a system font stack if you need a fully offline
-> build). Likewise, the `postinstall` hook runs `prisma generate`, which
-> needs to reach `binaries.prisma.sh` — see the transparency note in
-> **Database** above if that's blocked in your environment too.
+> build). Prisma 7's `postinstall` hook runs `prisma generate`, which now works
+> from pure JavaScript (no engine binary to fetch) — see the transparency note
+> in **Database** above.

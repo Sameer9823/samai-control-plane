@@ -13,7 +13,9 @@
  * Requires `npx prisma generate` to have been run first so `@prisma/client`
  * has types for this schema.
  */
+import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import bcrypt from "bcryptjs";
 import {
   AGENTS,
@@ -29,9 +31,18 @@ import {
   USAGE_SERIES,
 } from "../lib/samai/demo-data";
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({
+  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
+  log: ["error"],
+});
 
 async function main() {
+  const existing = await prisma.organization.count();
+  if (existing > 0) {
+    console.log("Database already seeded — skipping.");
+    return;
+  }
+
   console.log("Seeding SamAI Control Plane...");
 
   const org = await prisma.organization.create({ data: { name: "Acme AI" } });

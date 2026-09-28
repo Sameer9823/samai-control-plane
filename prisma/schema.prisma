@@ -1,8 +1,8 @@
 // SamAI Control Plane — Prisma schema
-// Run `npx prisma generate` after `npm install` (needs normal internet
-// access to fetch Prisma's engine binaries — this sandbox's network is
-// restricted, so generation/migration was verified here via hand-derived
-// raw SQL against a live Postgres instance instead; see prisma/migrations/).
+// Run `npx prisma generate` after `npm install`. Prisma 7 uses a built-in
+// JavaScript query compiler, so generation needs no engine-binary download.
+// The datasource URL lives in `prisma.config.ts` (Prisma 7 moved it out of
+// the schema file); see README.md's Database section for verification details.
 
 generator client {
   provider = "prisma-client-js"

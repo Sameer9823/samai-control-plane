@@ -4,7 +4,7 @@ const SECTIONS = [
   "Quickstart", "Agents", "Tools", "Handoffs", "Memory", "Guardrails", "MCP", "Voice", "Tracing", "Streaming", "Sessions", "Evaluations",
 ];
 
-const QUICKSTART = `import { createClient, anthropic, defineTool } from "samai-sdk";
+const QUICKSTART = `import { createClient, openai, defineTool } from "samai-sdk";
 import { z } from "zod";
 
 const getWeather = defineTool({
@@ -15,11 +15,11 @@ const getWeather = defineTool({
 });
 
 const client = createClient({
-  provider: anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }),
+  provider: openai({ apiKey: process.env.OPENAI_API_KEY }),
 });
 
 const result = await client.generate({
-  model: "claude-sonnet-4-6",
+  model: "gpt-4.1",
   system: "You are a concise assistant.",
   messages: [{ role: "user", content: "What's the weather in Chennai?" }],
   tools: [getWeather],
